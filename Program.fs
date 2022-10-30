@@ -7,12 +7,14 @@
 
     We'll plot a width*height TUI graph like:
             < plot title >
+
         <--- labels ---><-- n -->
         m-1 -> max      ┤     ┌─┐
         ...    ...      ┤     │ │
         i   -> yaxis(i) ┤┌──┐ │ └
         ...    ...      ┤│  │ │
         0   -> min      ┼┘  └─┘
+
             < stats: avg, std, nan >
 
     Using glyphs from codepage 437 (Unicoded):
@@ -108,6 +110,80 @@ let (+=) (plot, (i, j)) delta =
     Plot.set plot (i, j) <| (Plot.get plot (i, j)) + delta
 
 
+/// Fixed-capacity circular buffer for floats, also tracking statistics.
+type StatsQueue = {
+    Buffer: float[]
+    mutable Front: int
+    mutable Back: int
+    mutable Sum: float
+    mutable SquaredSum: float
+    mutable Dropped: int
+}
+
+// NOTE: we use NaNs to mark tombstones
+module StatsQueue =
+    open System
+
+    let make capacity =
+        if capacity <= 0 then failwithf "queue capacity must be positive"
+        { Buffer = Array.create capacity nan; Front = 0; Back = 0
+          Sum = 0.0; SquaredSum = 0.0; Dropped = 0 }
+
+    let dequeue q =
+        let x = q.Buffer[q.Front]
+        if Double.IsFinite x then
+            q.Buffer[q.Front] <- nan
+            q.Front <- (q.Front + 1) % q.Buffer.Length
+            q.Sum <- q.Sum - x
+            q.SquaredSum <- q.SquaredSum - (x * x)
+        x
+
+    let enqueue q x =
+        if Double.IsFinite q.Buffer[q.Back] then dequeue q |> ignore
+        if Double.IsFinite x then
+            q.Buffer[q.Back] <- x
+            q.Back <- (q.Back + 1) % q.Buffer.Length
+            q.Sum <- q.Sum + x
+            q.SquaredSum <- q.SquaredSum + (x * x)
+        else
+            q.Dropped <- q.Dropped + 1
+
+    let toSeq q = seq {
+        let mutable i = q.Front
+        let mutable stop = false
+        while Double.IsFinite q.Buffer[i] && not stop do
+            yield q.Buffer[i]
+            i <- (i + 1) % q.Buffer.Length
+            if i = q.Back then stop <- true
+    }
+
+    let count q =
+        toSeq q |> Seq.length
+
+    let sum q =
+        q.Sum
+
+    let min q =
+        toSeq q |> Seq.min
+
+    let max q =
+        toSeq q |> Seq.max
+
+    let avg q =
+        let n = count q |> float
+        q.Sum / n
+
+    let var q =
+        let n = count q |> float
+        (q.SquaredSum - (q.Sum * q.Sum / n )) / (n - 1.0)
+
+    let std q =
+        sqrt (var q)
+
+    let dropped q =
+        q.Dropped
+
+
 module Math =
     /// Linearly interpolates a value across two arbitrary ranges.
     let lerp (inMin, inMax) (outMin, outMax) x =
@@ -116,83 +192,94 @@ module Math =
 
 open System
 
+let VERSION = "0.1"
+
 [<EntryPoint>]
 let main argv =
     // parse CLI options
     let width = 80
     let height = 24
 
-    // set option-derived parameters
-    let m = height - 1 - 1
+    // compute derived parameters
+    let m = height - 2 - 2
     if m < 1 then failwithf $"{width}x{height} plot region is not tall enough"
     let n = width - (7 + 3 + 1)
     if n < 1 then failwithf $"{width}x{height} plot region is not wide enough"
 
     // allocate buffers
-    let data = Array.create n nan
+    let data = StatsQueue.make n
     let buckets = Array.create n -1
     let labels = Array.create m "?"
     let plot = Plot.make m n
 
-    // read timeseries data
-    let mutable validValues = 0
-    for arg in argv do
-        match Double.TryParse(arg) with
-        | true, x ->
-            data[validValues] <- x
-            validValues <- validValues + 1
-        | _ -> ()
-    let dataMin = Seq.min data
-    let dataMax = Seq.max data
+    // define update loop
+    let redraw data =
+        // update stats
+        let min' = StatsQueue.min data
+        let max' = StatsQueue.max data
+        let avg = StatsQueue.avg data
+        let std = StatsQueue.std data
+        let nans = StatsQueue.dropped data
 
-    // cache quantization results for each point
-    let quantize y =
-        if Double.IsFinite y then
-            Math.lerp (dataMin, dataMax) (0.0, float m - 1.0) y
-            |> round |> int
-        else
-            -1
-    do data |> Seq.iteri (fun i y -> buckets[i] <- quantize y)
+        // cache quantization results for each point
+        let quantize y =
+            if Double.IsFinite y then
+                Math.lerp (min', max') (0.0, float m - 1.0) y
+                |> round |> int
+            else
+                -1
+        do StatsQueue.toSeq data |> Seq.iteri (fun i y -> buckets[i] <- quantize y)
 
-    // prepare Y axis labels
-    let yaxis i =
-        Math.lerp (0.0, float m - 1.0) (dataMin, dataMax) (float i)
-    for i = 0 to labels.Length - 1 do
-        labels[i] <- sprintf "% 10.3g " (yaxis i)
+        // prepare Y axis labels
+        let yaxis i =
+            Math.lerp (0.0, float m - 1.0) (min', max') (float i)
+        for i = 0 to labels.Length - 1 do
+            labels[i] <- sprintf "% 10.3g " (yaxis i)
 
-    // clear the plot
-    do Plot.reset plot
+        // clear the plot and redraw Y axis
+        do Plot.reset plot
+        for i = 0 to m - 1 do
+            Plot.set plot (i, 0) <| point (LEFT + UP + DOWN)
 
-    // draw Y axis
-    for i = 0 to m - 1 do
-        Plot.set plot (i, 0) <| point (LEFT + UP + DOWN)
+        // rasterize timeseries
+        for rasterHeight = 0 to m - 1 do
+            for x = 0 to n - 1 do
+                // if there's a data point here, the RIGHT segment MUST be drawn
+                let pointHeight = buckets[x]
+                if pointHeight >= 0 then
+                    let mutable y = if rasterHeight = pointHeight then RIGHT else EMPTY
 
-    // rasterize timeseries
-    for rasterHeight = 0 to m - 1 do
-        for x = 0 to n - 1 do
-            // if there's a data point here, the RIGHT segment MUST be drawn
-            let pointHeight = buckets[x]
-            if pointHeight >= 0 then
-                let mutable y = if rasterHeight = pointHeight then RIGHT else EMPTY
+                    // connector segments are drawn based on the current derivative
+                    // and raster height with respect to the previous data point
+                    if x > 0 then
+                        let previous = buckets[x - 1]
+                        assert Double.IsFinite previous
+                        if previous = pointHeight && rasterHeight = pointHeight then
+                            y <- y + LEFT
+                        elif previous > pointHeight then
+                            if rasterHeight = previous then y <- y + LEFT
+                            if previous >= rasterHeight && rasterHeight > pointHeight then y <- y + DOWN
+                            if previous > rasterHeight && rasterHeight >= pointHeight then y <- y + UP
+                        elif previous < pointHeight then
+                            if rasterHeight = previous then y <- y + LEFT
+                            if previous <= rasterHeight && rasterHeight < pointHeight then y <- y + UP
+                            if previous < rasterHeight && rasterHeight <= pointHeight then y <- y + DOWN
 
-                // connector segments are drawn based on the current derivative and
-                // raster height with respect to the previous data point
-                if x > 0 then
-                    let previous = buckets[x - 1]
-                    if previous = pointHeight && rasterHeight = pointHeight then
-                        y <- y + LEFT
-                    elif previous > pointHeight then
-                        if rasterHeight = previous then y <- y + LEFT
-                        if previous >= rasterHeight && rasterHeight > pointHeight then y <- y + DOWN
-                        if previous > rasterHeight && rasterHeight >= pointHeight then y <- y + UP
-                    elif previous < pointHeight then
-                        if rasterHeight = previous then y <- y + LEFT
-                        if previous <= rasterHeight && rasterHeight < pointHeight then y <- y + UP
-                        if previous < rasterHeight && rasterHeight <= pointHeight then y <- y + DOWN
+                    (plot, (rasterHeight, x)) += point y
 
-                (plot, (rasterHeight, x)) += point y
+        // "render" the plot
+        do
+            Console.Clear()
+            printfn $"    github.com/baioc/graf {VERSION}\n"
+            Console.WriteLine(Plot.toString plot labels)
+            printfn "\n    avg=%.2g std=%.2g nans=%d" avg std nans
 
-    // display the plotted graph
-    do Console.WriteLine(Plot.toString plot labels)
+    // drive update loop
+    let mutable input = Console.In.ReadLine()
+    while not (isNull input) do
+        let y = match Double.TryParse(input) with true, x -> x | _ -> nan
+        do StatsQueue.enqueue data y
+        if StatsQueue.count data > 0 then redraw data
+        input <- Console.In.ReadLine()
 
     0
