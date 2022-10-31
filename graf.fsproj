@@ -2,23 +2,24 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0</TargetFramework>
-    <!-- <TargetFramework>net7.0</TargetFramework> -->
   </PropertyGroup>
 
   <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishReadyToRun>true</PublishReadyToRun>
     <PublishTrimmed>true</PublishTrimmed>
   </PropertyGroup>
 
   <!-- <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
     <PublishAot>true</PublishAot>
     <StripSymbols>true</StripSymbols>
   </PropertyGroup> -->
 
   <ItemGroup>
-    <Compile Include="Program.fs"/>
+    <Compile Include="Graf.fs" />
+    <Compile Include="Program.fs" />
   </ItemGroup>
 
 </Project>
