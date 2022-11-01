@@ -1,13 +1,21 @@
 namespace Graf
 
 (*
+    TL;DR? Just do:
+    ```
+        timeseries // seq<float>
+        |> Graf.plot (m,n) color
+        |> Plot.toString labels
+        |> System.Console.Out.WriteLine
+    ```
+
     Given some input timeseries data:
         min, max = min(data), max(data)
         m = height - title - stats
         n = width - labelSize
         yaxis(i) = lerp (0, m-1) (min, max) i
 
-    We'll plot a width*height TUI graph like:
+    We'll plot a width*height TUI chart like:
             < plot title >
 
         <--- labels ---><-- n -->
@@ -19,7 +27,7 @@ namespace Graf
 
             < stats: avg, std, nan >
 
-    Using glyphs from codepage 437 (Unicoded):
+    Using glyphs from code page 437 (Unicoded):
         │ u2502    ┤ u2524    ┐ u2510
         └ u2514    ┴ u2534    ┬ 252C
         ├ u251C    ─ u2500    ┼ u253C
@@ -29,7 +37,7 @@ namespace Graf
 open System
 
 
-/// Encodes a "four-segment display" with UP, DOWN, LEFT, RIGHT or any combination of these.
+/// Encodes a "four-segment display" with UP, DOWN, LEFT, RIGHT and combinations thereof.
 type FourSegmentDisplay = byte
 
 module FourSegmentDisplay =
@@ -48,43 +56,105 @@ module FourSegmentDisplay =
     [<Literal>]
     let DOWN  : FourSegmentDisplay = 0b1000uy
 
+    let internal glyphs = Map [|
+        (EMPTY,                    " ")
+        (UP + DOWN,                "│")
+        (LEFT + UP + DOWN,         "┤")
+        (LEFT + DOWN,              "┐")
+        (UP + RIGHT,               "└")
+        (UP + RIGHT + DOWN,        "├")
+        (LEFT + RIGHT,             "─")
+        (LEFT + UP + RIGHT + DOWN, "┼")
+        (LEFT + UP,                "┘")
+        (RIGHT + DOWN,             "┌")
+        (LEFT + UP + RIGHT,        "┴")
+        (LEFT + RIGHT + DOWN,      "┬")
+    |]
+
 open FourSegmentDisplay
+
+
+/// Encodes a 3-bit RGB (additive) color space for standard ANSI terminal colors.
+type AnsiColor = byte
+
+// 3 LSBs in ANSI color codes are defined such that C=G+B, M=R+B, Y=R+G, nice!
+module AnsiColor =
+    [<Literal>]
+    let BLACK   : AnsiColor = 0uy
+
+    [<Literal>]
+    let RED     : AnsiColor = 1uy
+
+    [<Literal>]
+    let GREEN   : AnsiColor = 2uy
+
+    [<Literal>]
+    let YELLOW  : AnsiColor = 3uy
+
+    [<Literal>]
+    let BLUE    : AnsiColor = 4uy
+
+    [<Literal>]
+    let MAGENTA : AnsiColor = 5uy
+
+    [<Literal>]
+    let CYAN    : AnsiColor = 6uy
+
+    [<Literal>]
+    let WHITE   : AnsiColor = 7uy
+
+    // ok, this is not a 3-bit color space after all
+    let DEFAULT : AnsiColor = 225uy // = (byte Byte.MaxValue) - 30uy
+
+    let internal code color =
+        if color = DEFAULT then 0uy else 30uy + min WHITE color
+
+    let toString color =
+        let ansi = code color
+        $"\x1b[{ansi}m"
+
+open AnsiColor
 
 
 /// Represents the content of a specific point in a plot spec.
 [<Struct>]
 type Point = {
     Segment: FourSegmentDisplay
+    Color: AnsiColor
 } with
+    static member Blank =
+        { Segment = EMPTY; Color = DEFAULT }
+
     override this.ToString() =
-        Map [|
-            (EMPTY,                    " ")
-            (UP + DOWN,                "│")
-            (LEFT + UP + DOWN,         "┤")
-            (LEFT + DOWN,              "┐")
-            (UP + RIGHT,               "└")
-            (UP + RIGHT + DOWN,        "├")
-            (LEFT + RIGHT,             "─")
-            (LEFT + UP + RIGHT + DOWN, "┼")
-            (LEFT + UP,                "┘")
-            (RIGHT + DOWN,             "┌")
-            (LEFT + UP + RIGHT,        "┴")
-            (LEFT + RIGHT + DOWN,      "┬")
-        |] |> Map.find this.Segment
+        let segment = min (LEFT + UP + RIGHT + DOWN) this.Segment
+        let color = AnsiColor.toString this.Color
+        let reset = AnsiColor.toString AnsiColor.DEFAULT
+        match Map.tryFind segment FourSegmentDisplay.glyphs with
+        | Some glyph -> color + glyph + reset
+        | None -> failwith "single-segment points have no known mapping to CP437"
 
     static member (+) (lhs, rhs) =
-        { Segment = lhs.Segment ||| rhs.Segment }
+        let diff = lhs.Color <> rhs.Color
+        let mixed =
+            let lhs = if lhs.Color = AnsiColor.DEFAULT then 0uy else lhs.Color
+            let rhs = if rhs.Color = AnsiColor.DEFAULT then 0uy else rhs.Color
+            min WHITE (lhs + rhs) // saturating addition
+        { Segment = lhs.Segment ||| rhs.Segment
+          Color = if diff then mixed else lhs.Color }
 
-    static member Empty =
-        { Segment = EMPTY }
+module Point =
+    let withColor color point =
+        { point with Color = color }
 
 [<AutoOpen>]
-module Point =
-    let point segment =
-        { Segment = segment }
+module PointSugar =
+    let point segment = {
+        Segment = segment
+        Color = AnsiColor.DEFAULT
+    }
 
 
-/// Fixed-capacity circular buffer for floats, also tracking statistics.
+/// Fixed-capacity circular buffer for timeseries data.
 type StatsQueue = private {
     Buffer: float[]
     mutable Front: int
@@ -92,13 +162,24 @@ type StatsQueue = private {
     mutable Sum: float
     mutable SquaredSum: float
     mutable Dropped: int
-}
+} with
+    member private this.toSeq() = seq {
+        let mutable i = this.Front
+        let mutable stop = false
+        while Double.IsFinite this.Buffer[i] && not stop do
+            yield this.Buffer[i]
+            i <- (i + 1) % this.Buffer.Length
+            if i = this.Back then stop <- true
+    }
+
+    override this.ToString() =
+        "[|" + (this.toSeq() |> Seq.map string |> String.concat "; ") + "|]"
 
 // NOTE: we use NaNs to mark tombstones
 [<RequireQualifiedAccess>]
 module StatsQueue =
     let make capacity =
-        if capacity <= 0 then failwithf "queue capacity must be positive"
+        if capacity <= 0 then failwith "queue capacity must be strictly positive"
         { Buffer = Array.create capacity nan; Front = 0; Back = 0
           Sum = 0.0; SquaredSum = 0.0; Dropped = 0 }
 
@@ -158,12 +239,12 @@ module StatsQueue =
 
 
 module Math =
-    /// Linearly interpolates a value across two arbitrary ranges.
+    /// Linearly interpolates across two arbitrary ranges.
     let lerp (inMin, inMax) (outMin, outMax) x : float =
             (x - inMin) * (outMax - outMin) / (inMax - inMin) + outMin
 
 
-/// Represents a (mutable) graph plot specification.
+/// Represents a (mutable) plot specification.
 type Plot = private {
     Data: Point[]
     Rows: int
@@ -180,7 +261,7 @@ type Plot = private {
 [<RequireQualifiedAccess>]
 module Plot =
     let create rows cols =
-        let data = Array.create (rows * cols) Point.Empty
+        let data = Array.create (rows * cols) (point EMPTY)
         { Data = data; Rows = rows; Cols = cols }
 
     let size plot =
@@ -193,9 +274,9 @@ module Plot =
         plot.Data[i*plot.Cols + j] <- x
 
     let reset plot =
-        Array.fill plot.Data 0 (plot.Rows * plot.Cols) Point.Empty
+        Array.fill plot.Data 0 (plot.Rows * plot.Cols) (point EMPTY)
 
-    let toString plot labels =
+    let toString labels plot =
         plot.Data
         |> Seq.map string
         |> Seq.chunkBySize plot.Cols
@@ -204,17 +285,15 @@ module Plot =
         |> Seq.rev
         |> String.concat "\n"
 
-    let private (+=) (plot, (i, j)) delta =
-        set plot (i, j) <| (get plot (i, j)) + delta
-
-    let make (m, n) data =
-        // allocate buffers
-        let buckets = Array.create n -1
-        let plot = create m n
+    let make (m, n) color data =
+        let (+=) (plot, (i, j)) delta =
+            set plot (i, j) <| (get plot (i, j)) + delta
 
         // compute range
-        let min' = Seq.min data
-        let max' = Seq.max data
+        let min = Seq.min data
+        let max = Seq.max data
+        let min', max' =
+            if min <> max then min, max else min - 1.0, max + 1.0
 
         // cache quantization results for each point
         let quantize y =
@@ -223,11 +302,12 @@ module Plot =
                 |> round |> int
             else
                 -1
+        let buckets = Array.create n -1
         do data |> Seq.iteri (fun i y -> buckets[i] <- quantize y)
 
-        // draw Y axis
-        for i = 0 to m - 1 do
-            set plot (i, 0) <| point (LEFT + UP + DOWN)
+        // clear (initialize) the plot and draw Y axis
+        let plot = create m n
+        for i = 0 to m - 1 do set plot (i, 0) <| point (LEFT + UP + DOWN)
 
         // rasterize timeseries
         for rasterHeight = 0 to m - 1 do
@@ -253,10 +333,12 @@ module Plot =
                             if previous <= rasterHeight && rasterHeight < pointHeight then y <- y + UP
                             if previous < rasterHeight && rasterHeight <= pointHeight then y <- y + DOWN
 
-                    (plot, (rasterHeight, x)) += point y
+                    if y <> EMPTY then
+                        (plot, (rasterHeight, x)) += (point y |> Point.withColor color)
 
         plot
 
 [<AutoOpen>]
 module Graf =
-    let plot (rows, cols) data = Plot.make (rows, cols) data
+    let plot (rows, cols) color data =
+        Plot.make (rows, cols) color data
