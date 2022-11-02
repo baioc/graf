@@ -1,14 +1,6 @@
 namespace Graf
 
 (*
-    TL;DR? Just do:
-    ```
-        timeseries // seq<float>
-        |> Graf.plot (m,n) color
-        |> Plot.toString labels
-        |> System.Console.Out.WriteLine
-    ```
-
     Given some input timeseries data:
         min, max = min(data), max(data)
         m = height - title - stats
@@ -16,16 +8,14 @@ namespace Graf
         yaxis(i) = lerp (0, m-1) (min, max) i
 
     We'll plot a width*height TUI chart like:
-            < plot title >
-
+            < header >
         <--- labels ---><-- n -->
         m-1 -> max      ┤     ┌─┐
         ...    ...      ┤     │ │
         i   -> yaxis(i) ┤┌──┐ │ └
         ...    ...      ┤│  │ │
         0   -> min      ┼┘  └─┘
-
-            < stats: avg, std, nan >
+            < footer >
 
     Using glyphs from code page 437 (Unicoded):
         │ u2502    ┤ u2524    ┐ u2510
@@ -292,8 +282,7 @@ module Plot =
         // compute range
         let min = Seq.min data
         let max = Seq.max data
-        let min', max' =
-            if min <> max then min, max else min - 1.0, max + 1.0
+        let min', max' = if min <> max then min, max else min - 1.0, max + 1.0
 
         // cache quantization results for each point
         let quantize y =
