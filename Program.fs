@@ -17,6 +17,10 @@ module Seq =
         let var = (squaredSum - (sum * sum / n )) / (n - 1.0)
         len, min, max, avg, var
 
+let fatal (msg: string) =
+    do Console.Error.WriteLine(msg)
+    exit -1
+
 
 let version = "0.2.7"
 
@@ -46,32 +50,179 @@ Links:
 graf v{version}
 Copyright (c) 2022 Gabriel B. Sant'Anna"
 
+
+type Options = {
+    Help: bool
+    File: string
+    Title: string
+    Color: string
+    Stats: bool
+    Range: string
+    Digits: int
+    Width: int
+    Height: int
+}
+
+let defaultOptions = {
+    Help = false
+    File = "-"
+    Title = ""
+    Color = "blue"
+    Stats = false
+    Range = ""
+    Digits = 1
+    Width = Console.BufferWidth
+    Height = Console.BufferHeight
+}
+
+// parse command line
+let rec parseCLI seen opts args =
+    let set (arg: string) =
+        if Set.contains arg seen then
+            do Console.Error.WriteLine($"Warning: --{arg} option was set more than once")
+            seen
+        else
+            Set.add arg seen
+
+    match args with
+    | [] -> opts
+    | "-h"::rest | "--help"::rest ->
+        parseCLI (set "help") { opts with Help = true } rest
+
+    | "-f"::file::rest | "--file"::file::rest ->
+        parseCLI (set "file") { opts with File = file } rest
+
+    | "-t"::title::rest | "--title"::title::rest ->
+        parseCLI (set "title") { opts with Title = title } rest
+
+    | "-c"::color::rest | "--color"::color::rest ->
+        parseCLI (set "color") { opts with Color = color } rest
+
+    | "-s"::rest | "--stats"::rest ->
+        parseCLI (set "stats") { opts with Stats = true } rest
+
+    | "-r"::range::rest | "--range"::range::rest ->
+        parseCLI (set "range") { opts with Range = range } rest
+
+    | "-d"::digits::rest | "--digits"::digits::rest ->
+        parseCLI (set "digits") { opts with Digits = int digits } rest
+
+    | "-W"::width::rest | "--width"::width::rest ->
+        parseCLI (set "width") { opts with Width = int width } rest
+
+    | "-H"::height::rest | "--height"::height::rest ->
+        parseCLI (set "height") { opts with Height = int height } rest
+
+    | unexpected::_ ->
+        let sp = " "
+        failwith $"unexpected option or missing argument at '{String.concat sp args}'"
+
+
+let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int -> int =
+    fun title color showStats (lowerBound, upperBound) digits width height ->
+        // derive parameters
+        let wastedLines = (if title.Length > 0 then 2 else 0) + (if showStats then 2 else 0)
+        let m = height - wastedLines
+        let worstCaseFloatCrap = 7 // sign + dot + e + eSign + 3 exponent digits
+        let numericWidth = digits + worstCaseFloatCrap
+        let n = width - numericWidth - 1 // 1 = space
+
+        // escape weird corners of the parameter space
+        if m < 2 then do fatal $"Error: {width} x {height} plot region is not tall enough"
+        if n < 2 then do fatal $"Error: {width} x {height} plot region is not wide enough"
+
+        // prepare format strings
+        let clearWidth = String.replicate width " "
+        let headerLine = if title.Length > 0 then $"{clearWidth}\r    {title}\n{clearWidth}\n" else ""
+        let statsFormat = $"\n{clearWidth}\n{clearWidth}\r    now={{0:T}} avg={{1:g{max 3 digits}}} std={{2:g{max 3 digits}}} NaN={{3:d}}"
+        let numberToString (width: int) (significantDigits: int) (x: float) =
+            String.Format($"{{0,{width}:g{significantDigits}}}", x)
+        let makeLabel (x: float) =
+            let sign = if x < 0 then 1 else 0
+            let dot = if round x <> x then 1 else 0
+            let leadingZeros =
+                String.Format("{0:g}", x)
+                |> Seq.takeWhile (fun c -> not (Char.IsNumber c) || c = '0')
+                |> Seq.filter (fun c -> c = '0')
+                |> Seq.length
+            let nonSignificant = sign + dot + leadingZeros
+            let maxPrecision = numberToString numericWidth (numericWidth - nonSignificant) x
+            if maxPrecision.Length > numericWidth then
+                let constrainedPrecision = numberToString numericWidth digits x
+                constrainedPrecision + " "
+            else
+                maxPrecision + " "
+
+        // allocate mutable buffers
+        let data = RingBuffer.create n nan
+        let labels = Array.create m ""
+
+        // pre-loop setup
+        let mutable nans = 0
+        let mutable input = Console.In.ReadLine()
+        do
+            Console.Clear()
+            Console.CancelKeyPress.Add (fun _ -> Console.Clear(); Console.CursorVisible <- true)
+            Console.CursorVisible <- false
+
+        while not (isNull input) do
+            // parse new data point
+            let y = match Double.TryParse(input) with true, x -> x | _ -> nan
+            if Double.IsFinite y then
+                RingBuffer.enqueue data y
+
+                // get updated stats
+                let timeseries = RingBuffer.toSeq data
+                let _, min, max, avg, var = Seq.statistics timeseries
+                let min = if Double.IsFinite lowerBound then lowerBound else min
+                let max = if Double.IsFinite upperBound then upperBound else max
+                let std = sqrt var
+                let now = DateTime.Now
+
+                // prepare Y axis labels
+                let yaxis i = Math.lerp (0.0, float m - 1.0) (min, max) (float i)
+                for i = 0 to labels.Length - 1 do
+                    labels[i] <- makeLabel (yaxis i)
+
+                // plot and redraw the chart
+                let plot = Graf.plot (m, n) (min, max) color timeseries
+                Console.SetCursorPosition(0, 0)
+                Console.Out.Write(headerLine)
+                Console.Out.Write(Plot.toString labels plot)
+                if showStats then Console.Out.Write(statsFormat, now, avg, std, nans)
+            else
+                nans <- nans + 1
+
+            // block until next input
+            input <- Console.In.ReadLine()
+
+        // on end of stream, return the number of lines which failed to parse
+        do Console.CursorVisible <- true
+        nans
+
+
 [<EntryPoint>]
 let main argv =
     do CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
 
-    // parse command line
-    let help = false
-    let file = "-"
-    let title = ""
-    let color = "blue"
-    let stats = false
-    let range = ":"
-    let digits = 1
-    let width = Console.BufferWidth
-    let height = Console.BufferHeight
-
-    // apply options
-    if help then
-        do Console.Out.WriteLine(usage); exit 0
-    if file <> "-" then
+    let opts =
         try
-            do Console.SetIn(new IO.StreamReader(file))
-        with | _ ->
-            do Console.Error.WriteLine($"Could not open file '{file}'"); exit -1
+            parseCLI Set.empty defaultOptions (List.ofArray argv)
+        with
+            | ex -> fatal $"Error: invalid command line syntax; {ex.Message}\n\n{usage}"
+
+    if opts.Help then
+        do Console.Out.WriteLine(usage); exit 0
+
+    if opts.File <> "-" then
+        try
+            do Console.SetIn(new IO.StreamReader(opts.File))
+        with
+            | _ -> fatal $"Error: could not open file '{opts.File}'"
+
     let color =
         let maybeColor =
-            Map.tryFind color (Map.ofSeq [
+            Map.tryFind opts.Color (Map.ofSeq [
                 ("", AnsiColor.DEFAULT)
                 ("k", AnsiColor.BLACK); ("black", AnsiColor.BLACK)
                 ("r", AnsiColor.RED); ("red", AnsiColor.RED)
@@ -82,100 +233,26 @@ let main argv =
                 ("c", AnsiColor.CYAN); ("cyan", AnsiColor.CYAN)
                 ("w", AnsiColor.WHITE); ("white", AnsiColor.WHITE)
             ])
-        if Option.isNone maybeColor then do Console.Error.WriteLine($"Unknown color {color}"); exit -1
+        if Option.isNone maybeColor then fatal $"Error: unknown color {opts.Color}"
         maybeColor.Value
+
     let lowerBound, upperBound =
-        if range = "" then
+        if opts.Range = "" then
             Double.NegativeInfinity, Double.PositiveInfinity
         else
             try
-                let subs = range.Split(':')
-                if subs.Length <> 2 then failwith range
+                let subs = opts.Range.Split(':')
+                if subs.Length <> 2 then failwith opts.Range
                 let lo, hi = subs[0], subs[1]
                 Double.Parse(lo), Double.Parse(hi)
             with | _ ->
-                do Console.Error.WriteLine($"Invalid range format '{range}'"); exit -1
-                failwith range
+                fatal $"Error: invalid range format '{opts.Range}'"
 
-    // derive parameters
-    let wastedLines = (if title.Length > 0 then 2 else 0) + (if stats then 2 else 0)
-    let m = height - wastedLines
-    let worstCaseFloatCrap = 7 // sign + dot + e + eSign + 3 exponent digits
-    let numericWidth = digits + worstCaseFloatCrap
-    let n = width - numericWidth - 1 // 1 = space
+    let enforcePositive var n =
+        if n <= 0 then do fatal $"Error: parameter {var}={n} must be strictly positive"
 
-    // escape weird corners of the parameter space
-    if m < 2 then do
-        Console.Error.WriteLine $"{width} x {height} plot region is not tall enough"
-        exit -1
-    if n < 2 then do
-        Console.Error.WriteLine $"{width} x {height} plot region is not wide enough"
-        exit -1
+    enforcePositive "DIGITS" opts.Digits
+    enforcePositive "WIDTH" opts.Width
+    enforcePositive "HEIGHT" opts.Height
 
-    // prepare format strings
-    let clearWidth = String.replicate width " "
-    let headerLine = if title.Length > 0 then $"{clearWidth}\r    {title}\n{clearWidth}\n" else ""
-    let statsFormat = $"\n{clearWidth}\n{clearWidth}\r    now={{0:T}} avg={{1:g{max 3 digits}}} std={{2:g{max 3 digits}}} NaN={{3:d}}"
-    let numberToString (width: int) (significantDigits: int) (x: float) =
-        String.Format($"{{0,{width}:g{significantDigits}}}", x)
-    let makeLabel (x: float) =
-        let sign = if x < 0 then 1 else 0
-        let dot = if round x <> x then 1 else 0
-        let leadingZeros =
-            String.Format("{0:g}", x)
-            |> Seq.takeWhile (fun c -> not (Char.IsNumber c) || c = '0')
-            |> Seq.filter (fun c -> c = '0')
-            |> Seq.length
-        let nonSignificant = sign + dot + leadingZeros
-        let maxPrecision = numberToString numericWidth (numericWidth - nonSignificant) x
-        if maxPrecision.Length > numericWidth then
-            let constrainedPrecision = numberToString numericWidth digits x
-            constrainedPrecision + " "
-        else
-            maxPrecision + " "
-
-    // allocate mutable buffers
-    let data = RingBuffer.create n nan
-    let labels = Array.create m ""
-
-    // pre-loop setup
-    let mutable nans = 0
-    let mutable input = Console.In.ReadLine()
-    do
-        Console.Clear()
-        Console.CancelKeyPress.Add (fun _ -> Console.Clear(); Console.CursorVisible <- true)
-        Console.CursorVisible <- false
-
-    while not (isNull input) do
-        // parse new data point
-        let y = match Double.TryParse(input) with true, x -> x | _ -> nan
-        if Double.IsFinite y then
-            RingBuffer.enqueue data y
-
-            // get updated stats
-            let timeseries = RingBuffer.toSeq data
-            let _, min, max, avg, var = Seq.statistics timeseries
-            let min, max = if range = "" then min, max else lowerBound, upperBound
-            let std = sqrt var
-            let now = DateTime.Now
-
-            // prepare Y axis labels
-            let yaxis i = Math.lerp (0.0, float m - 1.0) (min, max) (float i)
-            for i = 0 to labels.Length - 1 do
-                labels[i] <- makeLabel (yaxis i)
-
-            // plot and redraw the chart
-            let plot = Graf.plot (m, n) (min, max) color timeseries
-            Console.SetCursorPosition(0, 0)
-            Console.Out.Write(headerLine)
-            Console.Out.Write(Plot.toString labels plot)
-            if stats then Console.Out.Write(statsFormat, now, avg, std, nans)
-        else
-            nans <- nans + 1
-
-        // block until next input
-        input <- Console.In.ReadLine()
-
-    // on end of stream, return the number of lines which failed to parse
-    do Console.CursorVisible <- true
-    nans
+    runWith opts.Title color opts.Stats (lowerBound, upperBound) opts.Digits opts.Width opts.Height

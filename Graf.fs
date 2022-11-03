@@ -177,6 +177,7 @@ module Plot =
     let reset plot =
         Array.fill plot.Data 0 (plot.Rows * plot.Cols) (point EMPTY)
 
+    /// Stringifies plot spec with given labels for the Y axis.
     let toString labels plot =
         plot.Data
         |> Seq.map string
@@ -186,7 +187,7 @@ module Plot =
         |> Seq.rev
         |> String.concat "\n"
 
-    let make (m, n) (min, max) color data =
+    let internal make (m, n) (min, max) color data =
         // compute range
         let min = if Double.IsFinite min then min else Seq.min data
         let max = if Double.IsFinite max then max else Seq.max data
@@ -234,5 +235,6 @@ module Plot =
 
         plot
 
+/// Generates, with the specified parameters, a plot spec. for some input timeseries data.
 let plot (rows, cols) (min, max) color data =
     Plot.make (rows, cols) (min, max) color data
