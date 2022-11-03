@@ -1,4 +1,4 @@
-namespace Graf
+module Graf
 
 (*
     Given some input timeseries data:
@@ -46,7 +46,7 @@ module FourSegmentDisplay =
     [<Literal>]
     let DOWN  : FourSegmentDisplay = 0b1000uy
 
-    let internal glyphs = Map [|
+    let internal glyphs = Map [
         (EMPTY,                    " ")
         (UP + DOWN,                "│")
         (LEFT + UP + DOWN,         "┤")
@@ -59,7 +59,7 @@ module FourSegmentDisplay =
         (RIGHT + DOWN,             "┌")
         (LEFT + UP + RIGHT,        "┴")
         (LEFT + RIGHT + DOWN,      "┬")
-    |]
+    ]
 
 open FourSegmentDisplay
 
@@ -108,13 +108,10 @@ open AnsiColor
 
 /// Represents the content of a specific point in a plot spec.
 [<Struct>]
-type Point = {
+type PlotPoint = {
     Segment: FourSegmentDisplay
     Color: AnsiColor
 } with
-    static member Blank =
-        { Segment = EMPTY; Color = DEFAULT }
-
     override this.ToString() =
         let segment = min (LEFT + UP + RIGHT + DOWN) this.Segment
         let color = AnsiColor.toString this.Color
@@ -136,96 +133,10 @@ module Point =
     let withColor color point =
         { point with Color = color }
 
-[<AutoOpen>]
-module PointSugar =
-    let point segment = {
-        Segment = segment
-        Color = AnsiColor.DEFAULT
-    }
-
-
-/// Fixed-capacity circular buffer for timeseries data.
-type StatsQueue = private {
-    Buffer: float[]
-    mutable Front: int
-    mutable Back: int
-    mutable Sum: float
-    mutable SquaredSum: float
-    mutable Dropped: int
-} with
-    member private this.toSeq() = seq {
-        let mutable i = this.Front
-        let mutable stop = false
-        while Double.IsFinite this.Buffer[i] && not stop do
-            yield this.Buffer[i]
-            i <- (i + 1) % this.Buffer.Length
-            if i = this.Back then stop <- true
-    }
-
-    override this.ToString() =
-        "[|" + (this.toSeq() |> Seq.map string |> String.concat "; ") + "|]"
-
-// NOTE: we use NaNs to mark tombstones
-[<RequireQualifiedAccess>]
-module StatsQueue =
-    let make capacity =
-        if capacity <= 0 then failwith "queue capacity must be strictly positive"
-        { Buffer = Array.create capacity nan; Front = 0; Back = 0
-          Sum = 0.0; SquaredSum = 0.0; Dropped = 0 }
-
-    let dequeue q =
-        let x = q.Buffer[q.Front]
-        if Double.IsFinite x then
-            q.Buffer[q.Front] <- nan
-            q.Front <- (q.Front + 1) % q.Buffer.Length
-            q.Sum <- q.Sum - x
-            q.SquaredSum <- q.SquaredSum - (x * x)
-        x
-
-    let enqueue q x =
-        if Double.IsFinite q.Buffer[q.Back] then dequeue q |> ignore
-        if Double.IsFinite x then
-            q.Buffer[q.Back] <- x
-            q.Back <- (q.Back + 1) % q.Buffer.Length
-            q.Sum <- q.Sum + x
-            q.SquaredSum <- q.SquaredSum + (x * x)
-        else
-            q.Dropped <- q.Dropped + 1
-
-    let toSeq q = seq {
-        let mutable i = q.Front
-        let mutable stop = false
-        while Double.IsFinite q.Buffer[i] && not stop do
-            yield q.Buffer[i]
-            i <- (i + 1) % q.Buffer.Length
-            if i = q.Back then stop <- true
-    }
-
-    let length q =
-        toSeq q |> Seq.length
-
-    let sum q =
-        q.Sum
-
-    let min q =
-        toSeq q |> Seq.min
-
-    let max q =
-        toSeq q |> Seq.max
-
-    let avg q =
-        let n = length q |> float
-        q.Sum / n
-
-    let var q =
-        let n = length q |> float
-        (q.SquaredSum - (q.Sum * q.Sum / n )) / (n - 1.0)
-
-    let std q =
-        sqrt (var q)
-
-    let dropped q =
-        q.Dropped
+let point segment = {
+    Segment = segment
+    Color = AnsiColor.DEFAULT
+}
 
 
 module Math =
@@ -236,7 +147,7 @@ module Math =
 
 /// Represents a (mutable) plot specification.
 type Plot = private {
-    Data: Point[]
+    Data: PlotPoint[]
     Rows: int
     Cols: int
 } with
@@ -275,24 +186,19 @@ module Plot =
         |> Seq.rev
         |> String.concat "\n"
 
-    let make (m, n) color data =
-        let (+=) (plot, (i, j)) delta =
-            set plot (i, j) <| (get plot (i, j)) + delta
-
+    let make (m, n) (min, max) color data =
         // compute range
-        let min = Seq.min data
-        let max = Seq.max data
-        let min', max' = if min <> max then min, max else min - 1.0, max + 1.0
+        let min = if Double.IsFinite min then min else Seq.min data
+        let max = if Double.IsFinite max then max else Seq.max data
+        let min, max = if min <> max then min, max else min - 1.0, max + 1.0
 
         // cache quantization results for each point
-        let quantize y =
-            if Double.IsFinite y then
-                Math.lerp (min', max') (0.0, float m - 1.0) y
-                |> round |> int
-            else
-                -1
+        let quantize y = Math.lerp (min, max) (0.0, float m - 1.0) y |> (round >> int)
         let buckets = Array.create n -1
-        do data |> Seq.iteri (fun i y -> buckets[i] <- quantize y)
+        do
+            data
+            |> Seq.truncate n
+            |> Seq.iteri (fun i y -> buckets[i] <- quantize y)
 
         // clear (initialize) the plot and draw Y axis
         let plot = create m n
@@ -303,7 +209,7 @@ module Plot =
             for x = 0 to n - 1 do
                 // if there's a data point here, the RIGHT segment MUST be drawn
                 let pointHeight = buckets[x]
-                if pointHeight >= 0 then
+                if pointHeight >= 0 && pointHeight < m then
                     let mutable y = if rasterHeight = pointHeight then RIGHT else EMPTY
 
                     // connector segments are drawn based on the current derivative
@@ -323,11 +229,10 @@ module Plot =
                             if previous < rasterHeight && rasterHeight <= pointHeight then y <- y + DOWN
 
                     if y <> EMPTY then
-                        (plot, (rasterHeight, x)) += (point y |> Point.withColor color)
+                        let p = get plot (rasterHeight, x)
+                        set plot (rasterHeight, x) <| p + { Segment = y; Color = color }
 
         plot
 
-[<AutoOpen>]
-module Graf =
-    let plot (rows, cols) color data =
-        Plot.make (rows, cols) color data
+let plot (rows, cols) (min, max) color data =
+    Plot.make (rows, cols) (min, max) color data
