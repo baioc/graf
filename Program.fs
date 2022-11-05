@@ -1,8 +1,6 @@
 ﻿open System
-open System.Globalization
 
 open Handmade.Collections.Generic
-
 open Graf
 
 
@@ -11,7 +9,7 @@ module Seq =
     let statistics seq =
         let init = (0, Double.PositiveInfinity, Double.NegativeInfinity, 0.0, 0.0)
         let acc (n, m, M, s, ss) x = (n + 1, min m x, max M x, s + x, ss + x*x)
-        let len, min, max, sum, squaredSum = seq |> Seq.fold acc init
+        let len, min, max, sum, squaredSum = seq |> Seq.filter (not << Double.IsNaN) |> Seq.fold acc init
         let n = float len
         let avg = sum / n
         let var = (squaredSum - (sum * sum / n )) / (n - 1.0)
@@ -86,6 +84,7 @@ let rec parseCLI seen opts args =
 
     match args with
     | [] -> opts
+
     | "-h"::rest | "--help"::rest ->
         parseCLI (set "help") { opts with Help = true } rest
 
@@ -113,14 +112,13 @@ let rec parseCLI seen opts args =
     | "-H"::height::rest | "--height"::height::rest ->
         parseCLI (set "height") { opts with Height = int height } rest
 
-    | unexpected::_ ->
+    | unexpected ->
         let sp = " "
         failwith $"unexpected option or missing argument at '{String.concat sp args}'"
 
 
-let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int -> int =
-    fun title color showStats (lowerBound, upperBound) digits width height ->
-        // derive parameters
+let runWith (title: string) color showStats (lowerBound, upperBound) digits width height =
+        // derived parameters
         let wastedLines = (if title.Length > 0 then 2 else 0) + (if showStats then 2 else 0)
         let m = height - wastedLines
         let worstCaseFloatCrap = 7 // sign + dot + e + eSign + 3 exponent digits
@@ -133,8 +131,9 @@ let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int 
 
         // prepare format strings
         let clearWidth = String.replicate width " "
-        let headerLine = if title.Length > 0 then $"{clearWidth}\r    {title}\n{clearWidth}\n" else ""
-        let statsFormat = $"\n{clearWidth}\n{clearWidth}\r    now={{0:T}} avg={{1:g{max 3 digits}}} std={{2:g{max 3 digits}}} NaN={{3:d}}"
+        let colorize = AnsiColor.colorize color
+        let headerLine = if title.Length > 0 then $"{clearWidth}\r    {colorize title}\n{clearWidth}\n" else ""
+        let statsFormat = $"\n{clearWidth}\n{clearWidth}\r    " + colorize $"now={{0:T}} avg={{1:g{max 3 digits}}} std={{2:g{max 3 digits}}} NaN={{3:d}}"
         let numberToString (width: int) (significantDigits: int) (x: float) =
             String.Format($"{{0,{width}:g{significantDigits}}}", x)
         let makeLabel (x: float) =
@@ -155,10 +154,11 @@ let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int 
 
         // allocate mutable buffers
         let data = RingBuffer.create n nan
+        let mutable nans = 0
+        let chart = Chart.create m n
         let labels = Array.create m ""
 
         // pre-loop setup
-        let mutable nans = 0
         let mutable input = Console.In.ReadLine()
         do
             Console.Clear()
@@ -168,32 +168,40 @@ let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int 
         while not (isNull input) do
             // parse new data point
             let y = match Double.TryParse(input) with true, x -> x | _ -> nan
-            if Double.IsFinite y then
-                RingBuffer.enqueue data y
+            if not (Double.IsFinite y) then nans <- nans + 1
+            RingBuffer.enqueue data y
 
-                // get updated stats
-                let timeseries = RingBuffer.toSeq data
-                let _, min, max, avg, var = Seq.statistics timeseries
-                let min = if Double.IsFinite lowerBound then lowerBound else min
-                let max = if Double.IsFinite upperBound then upperBound else max
-                let std = sqrt var
-                let now = DateTime.Now
+            // get updated stats
+            let timeseries = RingBuffer.toSeq data
+            let _, min, max, avg, var = Seq.statistics timeseries
+            let min = if Double.IsFinite lowerBound then lowerBound else min
+            let max = if Double.IsFinite upperBound then upperBound else max
+            let std = sqrt var
+            let now = DateTime.Now
 
-                // prepare Y axis labels
-                let yaxis i = Math.lerp (0.0, float m - 1.0) (min, max) (float i)
-                for i = 0 to labels.Length - 1 do
-                    labels[i] <- makeLabel (yaxis i)
+            // configure plotted line
+            let line =
+                ChartLine.ofSeq timeseries
+                |> ChartLine.withColor color
+                |> ChartLine.withBounds (min, max)
 
-                // plot and redraw the chart
-                let plot = Graf.plot (m, n) (min, max) color timeseries
+            // prepare Y axis labels
+            let yaxis i = Math.lerp (0.0, float m - 1.0) (min, max) (float i)
+            for i = 0 to labels.Length - 1 do
+                labels[i] <- makeLabel (yaxis i)
+
+            // render the chart
+            do
+                Chart.clear chart
+                Chart.draw chart line
                 Console.SetCursorPosition(0, 0)
                 Console.Out.Write(headerLine)
-                Console.Out.Write(Plot.toString labels plot)
+                Console.Out.Write(chart.ToString(labels))
                 if showStats then Console.Out.Write(statsFormat, now, avg, std, nans)
-            else
-                nans <- nans + 1
+                Console.Out.Flush()
 
-            // block until next input
+            // if next input is not available, call the GC before blocking
+            if Console.In.Peek() < 0 then do GC.Collect()
             input <- Console.In.ReadLine()
 
         // on end of stream, return the number of lines which failed to parse
@@ -203,8 +211,6 @@ let runWith : String -> AnsiColor -> bool -> float * float -> int -> int -> int 
 
 [<EntryPoint>]
 let main argv =
-    do CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
-
     let opts =
         try
             parseCLI Set.empty defaultOptions (List.ofArray argv)
@@ -236,7 +242,7 @@ let main argv =
         if Option.isNone maybeColor then fatal $"Error: unknown color {opts.Color}"
         maybeColor.Value
 
-    let lowerBound, upperBound =
+    let min, max =
         if opts.Range = "" then
             Double.NegativeInfinity, Double.PositiveInfinity
         else
@@ -249,10 +255,10 @@ let main argv =
                 fatal $"Error: invalid range format '{opts.Range}'"
 
     let enforcePositive var n =
-        if n <= 0 then do fatal $"Error: parameter {var}={n} must be strictly positive"
+        if n <= 0 then do fatal $"Error: parameter {var} ({n}) must be strictly positive"
 
     enforcePositive "DIGITS" opts.Digits
     enforcePositive "WIDTH" opts.Width
     enforcePositive "HEIGHT" opts.Height
 
-    runWith opts.Title color opts.Stats (lowerBound, upperBound) opts.Digits opts.Width opts.Height
+    runWith opts.Title color opts.Stats (min, max) opts.Digits opts.Width opts.Height

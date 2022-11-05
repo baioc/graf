@@ -1,26 +1,42 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+﻿<!-- Ref: https://learn.microsoft.com/en-us/visualstudio/msbuild/msbuild -->
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <BuildDir>build</BuildDir>
   </PropertyGroup>
-
-  <!-- <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
-    <PublishSingleFile>true</PublishSingleFile>
-    <PublishReadyToRun>true</PublishReadyToRun>
-    <PublishTrimmed>true</PublishTrimmed>
-  </PropertyGroup> -->
 
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
-    <PublishAot>true</PublishAot>
-    <StripSymbols>true</StripSymbols>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>true</RetainVMGarbageCollection>
   </PropertyGroup>
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="6291456" />
+  </ItemGroup>
+
+  <Choose>
+    <When Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '7.0'))">
+      <PropertyGroup>
+        <TargetFramework>net7.0</TargetFramework>
+        <PublishAot>true</PublishAot>
+        <StripSymbols>true</StripSymbols>
+      </PropertyGroup>
+    </When>
+    <Otherwise>
+      <PropertyGroup>
+        <TargetFramework>net6.0</TargetFramework>
+        <PublishSingleFile>true</PublishSingleFile>
+        <PublishReadyToRun>true</PublishReadyToRun>
+        <PublishTrimmed>true</PublishTrimmed>
+      </PropertyGroup>
+    </Otherwise>
+  </Choose>
 
   <ItemGroup>
-    <Compile Include="Graf.fs" />
-    <Compile Include="RingBuffer.fs" />
-    <Compile Include="Program.fs" />
+    <Compile Include="Graf.fs"/>
+    <Compile Include="RingBuffer.fs"/>
+    <Compile Include="Program.fs"/>
   </ItemGroup>
 
 </Project>
