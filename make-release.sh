@@ -21,5 +21,5 @@ docker run -it --rm \
 # package
 cd build
 tar -czf graf-$VERSION-$TARGET.tar.gz graf
-sha256sum graf-$VERSION-$TARGET.tar.gz > graf-$VERSION-$TARGET.tar.gz.sha256
+sha256sum graf-$VERSION-$TARGET.tar.gz | tee graf-$VERSION-$TARGET.tar.gz.sha256
 cd ..
