@@ -1,6 +1,10 @@
 # graf
 
+![release](https://img.shields.io/github/v/release/baioc/graf?sort=semver)
+
 Plot discretized line charts in your terminal.
+
+![examples](https://user-images.githubusercontent.com/27034173/200157439-a43b3256-ea68-46b3-85f2-0902fdb3069e.gif)
 
 
 ## Usage
@@ -62,3 +66,5 @@ $ python3 -c 'import math; [print(math.sin(4*math.pi * p/100), math.cos(4*math.p
 && graf -f tmp.tsv --batch -t "" -t "" -H 30; echo \
 && rm tmp.tsv
 ```
+
+![sincos](https://user-images.githubusercontent.com/27034173/200157085-7a2ccf83-5966-4f7d-8b50-3d735dd4e188.png)
