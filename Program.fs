@@ -20,7 +20,12 @@ let fatal (msg: string) =
     exit -1
 
 
-let version = "0.2.7"
+let version = "0.3.3"
+// TODO: wishlist for v1.0
+// - permissive mode (ignore bad lines)
+// - batch mode (only draw once)
+// - write TSV/CSV to stderr
+// - delimiter option
 
 let usage = $"\
 Usage: graf [OPTION]...
@@ -29,6 +34,7 @@ Usage: graf [OPTION]...
 Options:
     -h, --help           Print this help message and exit the program.
     -f, --file FILE      If FILE is - or not specified, read from stdin.
+    -n, --lines N        Plot N <= 8 parallel lines. Default is inferred from 1st input.
     -t, --title TITLE    Display TITLE on top of the plotted chart.
     -c, --color COLOR    Color to plot the line in. See options below.
     -s, --stats          Show statistics, which are hidden by default.
@@ -36,6 +42,14 @@ Options:
     -d, --digits DIGITS  Ensure at least DIGITS significant digits are printed.
     -W, --width WIDTH    Maximum TUI width. Defaults to terminal width.
     -H, --height HEIGHT  Maximum TUI height. Defaults to terminal height.
+
+Notes:
+    - A single quantization range is used for the entire chart, so make sure
+    timeseries are similarly scaled when there are more than one.
+    - When the chart includes multiple lines, a default title is added in order
+    to help disambiguate them; furthermore, each timeseries is colored differently.
+    - Options '--title' and '--color' can be specified multiple times, in which
+    case they will be applied to each timeseries in a corresponding position.
 
 Colors:
     \x1b[30m k, black \x1b[0m \t \x1b[31m r, red     \x1b[0m \t \x1b[32m g, green \x1b[0m \t \x1b[33m y, yellow \x1b[0m
@@ -52,8 +66,9 @@ Copyright (c) 2022 Gabriel B. Sant'Anna"
 type Options = {
     Help: bool
     File: string
-    Title: string
-    Color: string
+    Lines: int
+    Titles: seq<string>
+    Colors: seq<string>
     Stats: bool
     Range: string
     Digits: int
@@ -64,14 +79,26 @@ type Options = {
 let defaultOptions = {
     Help = false
     File = "-"
-    Title = ""
-    Color = "blue"
+    Lines = 0
+    Titles = []
+    Colors = []
     Stats = false
     Range = ""
     Digits = 1
     Width = Console.BufferWidth
     Height = Console.BufferHeight
 }
+
+let defaultColors = [|
+    AnsiColor.RED
+    AnsiColor.GREEN
+    AnsiColor.BLUE
+    AnsiColor.MAGENTA
+    AnsiColor.YELLOW
+    AnsiColor.CYAN
+    AnsiColor.WHITE
+    AnsiColor.BLACK
+|]
 
 // parse command line
 let rec parseCLI seen opts args =
@@ -82,6 +109,17 @@ let rec parseCLI seen opts args =
         else
             Set.add arg seen
 
+    let addColor c =
+        // normalization
+        let color = if c = "black" then "k" else c
+        let color = if color.Length > 1 then color.Substring(0, 1) else color
+        // deduplication
+        if Seq.contains color opts.Colors then
+            do Console.Error.WriteLine($"Warning: color '{c}' was used more than once")
+            opts.Colors
+        else
+            Seq.append opts.Colors [color]
+
     match args with
     | [] -> opts
 
@@ -91,11 +129,14 @@ let rec parseCLI seen opts args =
     | "-f"::file::rest | "--file"::file::rest ->
         parseCLI (set "file") { opts with File = file } rest
 
+    | "-n"::lines::rest | "--lines"::lines::rest ->
+        parseCLI (set "lines") { opts with Lines = int lines } rest
+
     | "-t"::title::rest | "--title"::title::rest ->
-        parseCLI (set "title") { opts with Title = title } rest
+        parseCLI seen { opts with Titles = Seq.append opts.Titles [title] } rest
 
     | "-c"::color::rest | "--color"::color::rest ->
-        parseCLI (set "color") { opts with Color = color } rest
+        parseCLI seen { opts with Colors = addColor color } rest
 
     | "-s"::rest | "--stats"::rest ->
         parseCLI (set "stats") { opts with Stats = true } rest
@@ -117,10 +158,30 @@ let rec parseCLI seen opts args =
         failwith $"unexpected option or missing argument at '{String.concat sp args}'"
 
 
-let runWith (title: string) color showStats (lowerBound, upperBound) digits width height =
+let runWith multi (titles: string[]) (colors: AnsiColor[]) showStats (lowerBound, upperBound) digits width height =
+        // infer parameters from 1st input line
+        let mutable input = Console.In.ReadLine()
+        if isNull input then exit 0
+        let multi = if multi > 0 then multi else input.Trim().Split().Length
+        if multi > 8 then fatal $"Error: at most 8 lines can be plotted in a single chart"
+        assert (multi >= 1 && multi <= 8)
+
         // derived parameters
-        let wastedLines = (if title.Length > 0 then 2 else 0) + (if showStats then 2 else 0)
-        let m = height - wastedLines
+        let colors =
+            if colors.Length > 0 then colors
+            elif multi = 1 then [| AnsiColor.DEFAULT |]
+            else defaultColors
+        assert (colors.Length >= multi)
+        let title =
+            if multi = 1 && titles.Length > 0 then
+                titles[0]
+            elif multi = 1 && titles.Length = 0 then
+                ""
+            else
+                Array.init multi (fun i -> if i < titles.Length then titles[i] else $"%%{i+1}")
+                |> Seq.mapi (fun i t -> AnsiColor.colorize colors[i] t)
+                |> String.concat "\t"
+        let m = height - (if title.Length > 0 then 2 else 0) - (if showStats then 1 + multi else 0) - 1
         let worstCaseFloatCrap = 7 // sign + dot + e + eSign + 3 exponent digits
         let numericWidth = digits + worstCaseFloatCrap
         let n = width - numericWidth - 1 // 1 = space
@@ -131,9 +192,10 @@ let runWith (title: string) color showStats (lowerBound, upperBound) digits widt
 
         // prepare format strings
         let clearWidth = String.replicate width " "
-        let colorize = AnsiColor.colorize color
-        let headerLine = if title.Length > 0 then $"{clearWidth}\r    {colorize title}\n{clearWidth}\n" else ""
-        let statsFormat = $"\n{clearWidth}\n{clearWidth}\r    " + colorize $"now={{0:T}} avg={{1:g{max 3 digits}}} std={{2:g{max 3 digits}}} NaN={{3:d}}"
+        let headerFormat = if title.Length > 0 then $"{clearWidth}\r[{{0:T}}]\t{title}\n{clearWidth}\n" else ""
+        let statsFormat =
+            let g = max 3 digits
+            $"{clearWidth}\r    min={{0:g{g}}} max={{1:g{g}}} avg={{2:g{g}}} std={{3:g{g}}} nan={{4:d}}"
         let numberToString (width: int) (significantDigits: int) (x: float) =
             String.Format($"{{0,{width}:g{significantDigits}}}", x)
         let makeLabel (x: float) =
@@ -153,60 +215,72 @@ let runWith (title: string) color showStats (lowerBound, upperBound) digits widt
                 maxPrecision + " "
 
         // allocate mutable buffers
-        let data = RingBuffer.create n nan
-        let mutable nans = 0
+        let timeseries = Array.init multi (fun i -> RingBuffer.create n nan)
+        let nans = Array.create multi 0
         let chart = Chart.create m n
         let labels = Array.create m ""
 
         // pre-loop setup
-        let mutable input = Console.In.ReadLine()
         do
             Console.Clear()
             Console.CancelKeyPress.Add (fun _ -> Console.Clear(); Console.CursorVisible <- true)
             Console.CursorVisible <- false
 
+        // parse new data points(s)
         while not (isNull input) do
-            // parse new data point
-            let y = match Double.TryParse(input) with true, x -> x | _ -> nan
-            if not (Double.IsFinite y) then nans <- nans + 1
-            RingBuffer.enqueue data y
+            let strs = input.Trim().Split()
+            if strs.Length <> multi then
+                Console.CursorVisible <- true
+                fatal $"Error: expected {multi} whitespace-separated values, but found '{input}'"
+            strs |> Seq.iteri (fun i str ->
+                let y = match Double.TryParse(str) with true, y -> y | _ -> nan
+                RingBuffer.enqueue timeseries[i] y
+                if not (Double.IsFinite y) then nans[i] <- nans[i] + 1
+            )
 
-            // get updated stats
-            let timeseries = RingBuffer.toSeq data
-            let _, min, max, avg, var = Seq.statistics timeseries
-            let min = if Double.IsFinite lowerBound then lowerBound else min
-            let max = if Double.IsFinite upperBound then upperBound else max
-            let std = sqrt var
-            let now = DateTime.Now
+            // compute global quantization range
+            let timeseqs =  timeseries |> Seq.map RingBuffer.toSeq
+            let min =
+                if Double.IsFinite lowerBound then lowerBound
+                else timeseqs |> Seq.map Seq.min |> Seq.min
+            let max =
+                if Double.IsFinite upperBound then upperBound
+                else timeseqs |> Seq.map Seq.max |> Seq.max
 
-            // configure plotted line
-            let line =
-                ChartLine.ofSeq timeseries
-                |> ChartLine.withColor color
+            // clear the chart and (re)draw each line
+            Chart.clear chart
+            timeseqs |> Seq.iteri (fun i data ->
+                ChartLine.ofSeq data
+                |> ChartLine.withColor colors[i]
                 |> ChartLine.withBounds (min, max)
+                |> Chart.draw chart
+            )
 
             // prepare Y axis labels
             let yaxis i = Math.lerp (0.0, float m - 1.0) (min, max) (float i)
             for i = 0 to labels.Length - 1 do
                 labels[i] <- makeLabel (yaxis i)
 
-            // render the chart
-            do
-                Chart.clear chart
-                Chart.draw chart line
-                Console.SetCursorPosition(0, 0)
-                Console.Out.Write(headerLine)
-                Console.Out.Write(chart.ToString(labels))
-                if showStats then Console.Out.Write(statsFormat, now, avg, std, nans)
-                Console.Out.Flush()
+            // render the chart as text
+            Console.SetCursorPosition(0, 0)
+            Console.Out.Write(headerFormat, DateTime.Now)
+            Console.Out.WriteLine(chart.ToString(labels))
+            if showStats then
+                Console.Out.WriteLine(clearWidth)
+                timeseqs |> Seq.iteri (fun i data ->
+                    let _, min, max, avg, var = Seq.statistics data
+                    let std = sqrt var
+                    Console.Out.WriteLine(AnsiColor.colorize colors[i] statsFormat, min, max, avg, std, nans[i])
+                )
+            Console.Out.Flush()
 
             // if next input is not available, call the GC before blocking
-            if Console.In.Peek() < 0 then do GC.Collect()
+            if Console.In.Peek() < 0 then GC.Collect()
             input <- Console.In.ReadLine()
 
-        // on end of stream, return the number of lines which failed to parse
+        // on end of stream, return the number of values which failed to parse
         do Console.CursorVisible <- true
-        nans
+        Seq.sum nans
 
 
 [<EntryPoint>]
@@ -226,10 +300,10 @@ let main argv =
         with
             | _ -> fatal $"Error: could not open file '{opts.File}'"
 
-    let color =
+    let parseColor str =
         let maybeColor =
-            Map.tryFind opts.Color (Map.ofSeq [
-                ("", AnsiColor.DEFAULT)
+            Map.tryFind str (Map.ofSeq [
+                ("" , AnsiColor.DEFAULT)
                 ("k", AnsiColor.BLACK); ("black", AnsiColor.BLACK)
                 ("r", AnsiColor.RED); ("red", AnsiColor.RED)
                 ("g", AnsiColor.GREEN); ("green", AnsiColor.GREEN)
@@ -239,8 +313,19 @@ let main argv =
                 ("c", AnsiColor.CYAN); ("cyan", AnsiColor.CYAN)
                 ("w", AnsiColor.WHITE); ("white", AnsiColor.WHITE)
             ])
-        if Option.isNone maybeColor then fatal $"Error: unknown color {opts.Color}"
-        maybeColor.Value
+        if Option.isNone maybeColor then fatal $"Error: unknown color {str}"
+        else maybeColor.Value
+
+    let titles = Array.ofSeq opts.Titles
+
+    let colors =
+        if Seq.isEmpty opts.Colors then
+            [||]
+        else
+            let parsed = opts.Colors |> Seq.map parseColor
+            let exclude = Set.ofSeq parsed
+            let added = defaultColors |> Seq.filter (fun c -> not (Set.contains c exclude))
+            Seq.append parsed added |> Array.ofSeq
 
     let min, max =
         if opts.Range = "" then
@@ -254,11 +339,12 @@ let main argv =
             with | _ ->
                 fatal $"Error: invalid range format '{opts.Range}'"
 
-    let enforcePositive var n =
-        if n <= 0 then do fatal $"Error: parameter {var} ({n}) must be strictly positive"
+    let enforce var pred n =
+        if not (pred n) then fatal $"Error: parameter {var} ({n}) out of range"
 
-    enforcePositive "DIGITS" opts.Digits
-    enforcePositive "WIDTH" opts.Width
-    enforcePositive "HEIGHT" opts.Height
+    enforce "lines" (fun n -> n >= 0 && n <= 8) opts.Lines
+    enforce "digits" (fun n -> n > 0) opts.Digits
+    enforce "width" (fun n -> n > 0) opts.Width
+    enforce "height" (fun n -> n > 0) opts.Height
 
-    runWith opts.Title color opts.Stats (min, max) opts.Digits opts.Width opts.Height
+    runWith opts.Lines titles colors opts.Stats (min, max) opts.Digits opts.Width opts.Height

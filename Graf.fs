@@ -127,14 +127,14 @@ module AnsiColor =
 
     /// Mixes two colors together in additive (i.e. RGB model) fashion.
     let add lhs rhs : AnsiColor =
-        if lhs > WHITE then rhs
-        elif rhs > WHITE then lhs
+        if lhs = DEFAULT then rhs
+        elif rhs = DEFAULT then lhs
         else lhs ||| rhs
 
     /// Mixes two colors together in subtractive (i.e. CMY model) fashion.
     let sub lhs rhs : AnsiColor =
-        if lhs > WHITE then rhs
-        elif rhs > WHITE then lhs
+        if lhs = DEFAULT then rhs
+        elif rhs = DEFAULT then lhs
         else lhs &&& rhs
 
 open AnsiColor
@@ -149,7 +149,15 @@ type ChartPoint = struct
     new(segment) = { Segment = segment; Color = AnsiColor.DEFAULT }
 
     static member (+) (lhs: ChartPoint, rhs: ChartPoint) =
-        ChartPoint(lhs.Segment ||| rhs.Segment, add lhs.Color rhs.Color)
+        let mix = add lhs.Color rhs.Color
+        let ensureDifferent =
+            if lhs.Color <> rhs.Color &&
+               (mix = lhs.Color || mix = rhs.Color) &&
+               lhs.Color <> AnsiColor.DEFAULT &&
+               rhs.Color <> AnsiColor.DEFAULT
+            then (lhs.Color + rhs.Color) % (WHITE + 1uy)
+            else mix
+        ChartPoint(lhs.Segment ||| rhs.Segment, ensureDifferent)
 
     static member private glyphs = [|
         (*           EMPTY          *) ' '

@@ -34,9 +34,9 @@
   </Choose>
 
   <ItemGroup>
-    <Compile Include="Graf.fs"/>
-    <Compile Include="RingBuffer.fs"/>
-    <Compile Include="Program.fs"/>
+    <Compile Include="Graf.fs" />
+    <Compile Include="RingBuffer.fs" />
+    <Compile Include="Program.fs" />
   </ItemGroup>
 
 </Project>
