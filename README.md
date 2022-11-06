@@ -62,8 +62,8 @@ $ while curl -sS -L -w '\n' http://api.coincap.io/v2/rates/bitcoin; do sleep 1; 
 ```
 
 ```sh
-$ python3 -c 'import math; [print(math.sin(4*math.pi * p/100), math.cos(4*math.pi * p/100), sep="\t") for p in range(0, 100)]' > tmp.tsv \
-&& graf -f tmp.tsv --batch -t "" -t "" -H 30; echo \
+$ python3 -c 'from math import *; [print(sin(4*pi * p/100), cos(4*pi * p/100), sep="\t") for p in range(0, 100)]' > tmp.tsv \
+&& graf -f tmp.tsv --batch; echo \
 && rm tmp.tsv
 ```
 

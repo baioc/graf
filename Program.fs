@@ -15,6 +15,10 @@ module Seq =
         let var = (squaredSum - (sum * sum / n )) / (n - 1.0)
         len, min, max, avg, var
 
+    // XXX: beware of NaNs (see https://github.com/dotnet/fsharp/issues/13207)
+    let minNonNan s = seq { yield Double.PositiveInfinity; yield! s } |> Seq.min
+    let maxNonNan s = seq { yield Double.NegativeInfinity; yield! s } |> Seq.max
+
 let fatal (msg: string) =
     do Console.Error.WriteLine(msg)
     exit -1
@@ -103,7 +107,7 @@ let defaultColors = [|
 
 // parse command line
 let rec parseCLI seen opts args =
-    let set (arg: string) =
+    let set arg =
         if Set.contains arg seen then
             do Console.Error.WriteLine($"Warning: --{arg} option was set more than once")
             seen
@@ -194,6 +198,7 @@ let runWith
             Array.init multi (fun i -> if i < titles.Length then titles[i] else $"%%{i+1}")
             |> Seq.mapi (fun i t -> AnsiColor.colorize colors[i] t)
             |> String.concat "\t"
+            |> (fun s -> s.Trim())
     let m = height - (if title.Length > 0 then 2 else 0) - (if showStats then 1 + multi else 0)
     let worstCaseFloatCrap = 7 // sign + dot + e + eSign + 3 exponent digits
     let numericWidth = digits + worstCaseFloatCrap
@@ -210,11 +215,11 @@ let runWith
         else $"{clearWidth}\rseq={{0:d}} now={{1}}\t{title}\n{clearWidth}\n"
     let statsFormat =
         let g = max 3 digits
-        $"\n{clearWidth}\r    min={{0:g{g}}} max={{1:g{g}}} avg={{2:g{g}}} std={{3:g{g}}} nan={{4:d}}"
+        $"\n{clearWidth}\r    n={{0:d}} min={{1:g{g}}} max={{2:g{g}}} avg={{3:g{g}}} std={{4:g{g}}}"
     let numberToString (width: int) (significantDigits: int) (x: float) =
         String.Format($"{{0,{width}:g{significantDigits}}}", x)
-    let makeLabel (x: float) =
-        let sign = if x < 0 then 1 else 0
+    let makeLabel x =
+        let sign = if x < 0.0 then 1 else 0
         let dot = if round x <> x then 1 else 0
         let leadingZeros =
             String.Format("{0:g}", x)
@@ -239,7 +244,7 @@ let runWith
     let mutable t = 1
     do
         Console.Clear()
-        Console.CancelKeyPress.Add (fun _ -> Console.Clear(); Console.CursorVisible <- true)
+        Console.CancelKeyPress.Add (fun _ -> Console.Out.WriteLine(); Console.CursorVisible <- true)
         Console.CursorVisible <- false
     let render () = do
         Console.SetCursorPosition(0, 0)
@@ -248,10 +253,10 @@ let runWith
         if showStats then
             Console.Out.Write("\n" + clearWidth)
             timeseries |> Seq.map RingBuffer.toSeq |> Seq.iteri (fun i data ->
-                let _, min, max, avg, var = Seq.statistics data
+                let len, min, max, avg, var = Seq.statistics data
                 let std = sqrt var
                 let statsColored = AnsiColor.colorize colors[i] statsFormat
-                Console.Out.Write(statsColored, min, max, avg, std, nans[i]))
+                Console.Out.Write(statsColored, len, min, max, avg, std))
         Console.Out.Flush()
 
     while not (isNull input) do
@@ -265,24 +270,33 @@ let runWith
             else
                 Console.Error.WriteLine($"Warning: {msg}")
                 strs <- Array.create multi ""
+        assert (strs.Length = multi)
         strs |> Seq.iteri (fun i str ->
             let y = match Double.TryParse(str) with true, y -> y | _ -> nan
             RingBuffer.enqueue timeseries[i] y
             if not (Double.IsFinite y) then nans[i] <- nans[i] + 1)
+        assert (timeseries |> Array.forall (fun rb -> rb.Count > 0))
 
-        // compute global quantization range
-        let timeseqs = timeseries |> Seq.map RingBuffer.toSeq
-        let min =
-            if Double.IsFinite lowerBound then lowerBound
-            else timeseqs |> Seq.map Seq.min |> Seq.min
-        let max =
-            if Double.IsFinite upperBound then upperBound
-            else timeseqs |> Seq.map Seq.max |> Seq.max
+        // compute global quantization range (beware of NaNs)
+        let min, max =
+            if Double.IsFinite lowerBound && Double.IsFinite upperBound then
+                lowerBound, upperBound
+            else
+                let min' =
+                    if Double.IsFinite lowerBound then lowerBound
+                    else timeseries |> Seq.map (RingBuffer.toSeq >> Seq.minNonNan) |> Seq.minNonNan
+                let max' =
+                    if Double.IsFinite upperBound then upperBound
+                    else timeseries |> Seq.map (RingBuffer.toSeq >> Seq.maxNonNan) |> Seq.maxNonNan
+                let min'' = if Double.IsFinite min' then min' else 0.0
+                let max'' = if Double.IsFinite max' then max' else 0.0
+                min'', max''
 
         // clear the chart and (re)draw each line
         Chart.clear chart
-        timeseqs |> Seq.iteri (fun i data ->
-            ChartLine.ofSeq data
+        timeseries |> Array.iteri (fun i ys ->
+            RingBuffer.toSeq ys
+            |> ChartLine.ofSeq
             |> ChartLine.withColor colors[i]
             |> ChartLine.withBounds (min, max)
             |> Chart.draw chart)
@@ -304,7 +318,7 @@ let runWith
     do
         if batch then render() else Console.Out.WriteLine()
         Console.CursorVisible <- true
-    Seq.sum nans
+    Array.sum nans
 
 
 [<EntryPoint>]

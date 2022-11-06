@@ -113,26 +113,28 @@ module AnsiColor =
 
     /// Converts a **conceptual** AnsiColor into an **actual** ANSI terminal color code.
     let code color =
-        if color = DEFAULT then 0uy else 30uy + (WHITE &&& color)
+        if color = DEFAULT then 0 else int (30uy + (WHITE &&& color))
 
-    /// Wraps a stringifibale alue in a given color, then switches to the default style.
-    let wrap color str =
-        $"\x1b[{code color}m{str}\x1b[{code DEFAULT}m"
+    /// Wraps a stringifibale value in a given color, then switches to the default style.
+    let wrap color thing =
+        let str = string thing
+        if str.Length = 0 then str
+        else $"\x1b[{code color}m{str}\x1b[{code DEFAULT}m"
 
     /// Like `wrap`, but does nothing if the provided color is already DEFAULT.
     let colorize color str =
-        if color = DEFAULT then $"{str}" else wrap color str
+        if color = DEFAULT then string str else wrap color str
 
     // NICE: 3 LSBs in ANSI color codes are defined such that the following math works out.
 
     /// Mixes two colors together in additive (i.e. RGB model) fashion.
-    let add lhs rhs : AnsiColor =
+    let add lhs rhs =
         if lhs = DEFAULT then rhs
         elif rhs = DEFAULT then lhs
         else lhs ||| rhs
 
     /// Mixes two colors together in subtractive (i.e. CMY model) fashion.
-    let sub lhs rhs : AnsiColor =
+    let sub lhs rhs =
         if lhs = DEFAULT then rhs
         elif rhs = DEFAULT then lhs
         else lhs &&& rhs
@@ -161,7 +163,7 @@ type ChartPoint = struct
 
     static member private glyphs = [|
         (*           EMPTY          *) ' '
-        (*                     LEFT *) 'Χ'
+        (*                     LEFT *) 'Χ' // <- how NaNs render
         (*                UP        *) '?'
         (*                UP + LEFT *) '┘'
         (*        RIGHT             *) '?'
@@ -220,6 +222,10 @@ type Chart = private {
 } with
     /// Plots a chart to text, but with a prefix and suffix on each line (sorted from lowest to highest on the Y axis).
     member this.ToString(prefixes, suffixes) =
+        let rows = int this.Rows
+        let empty = Seq.init rows (fun _ -> "")
+        let prefixes = prefixes |> Seq.truncate rows |> (fun seq -> Seq.append seq empty)
+        let suffixes = suffixes |> Seq.truncate rows |> (fun seq -> Seq.append seq empty)
         this.Data
         |> Seq.map string
         |> Seq.chunkBySize (int this.Cols)
@@ -230,11 +236,10 @@ type Chart = private {
         |> String.concat "\n"
 
     member this.ToString(prefixes) =
-        this.ToString(prefixes, Seq.initInfinite (fun _ -> ""))
+        this.ToString(prefixes, Seq.empty)
 
     override this.ToString() =
-        let empty = Seq.initInfinite (fun _ -> "")
-        this.ToString(empty, empty)
+        this.ToString(Seq.empty, Seq.empty)
 
 module Chart =
     let clear chart =
@@ -260,23 +265,29 @@ module Chart =
     let set chart (i, j) x =
         do chart.Data[i*(int chart.Cols) + j] <- x
 
-    let private draw' chart (line: ChartLine) =
+    let private draw' chart (line: ChartLine) (data: float[]) =
+        // XXX: beware of NaNs (see https://github.com/dotnet/fsharp/issues/13207)
+        let minNonNan s = seq { yield Double.PositiveInfinity; yield! s } |> Seq.min
+        let maxNonNan s = seq { yield Double.NegativeInfinity; yield! s } |> Seq.max
+
         // get data range
-        let m, n = size chart
-        let data = Seq.truncate n line.Data |> Array.ofSeq
-        let min = if Double.IsFinite line.Min then line.Min else Seq.min data
-        let max = if Double.IsFinite line.Max then line.Max else Seq.max data
-        let min, max = if min <> max then min, max else min - 1.0, max + 1.0
+        let rows, _ = size chart
+        let min, max =
+            let min' = if Double.IsFinite line.Min then line.Min else minNonNan data
+            let max' = if Double.IsFinite line.Max then line.Max else maxNonNan data
+            let min'' = if Double.IsFinite min' then min' else 0.0
+            let max'' = if Double.IsFinite max' then max' else 0.0
+            if min'' <> max'' then min'', max'' else min'' - 1.0, max'' + 1.0
 
         // cache quantization results for each point
-        let quantize y = Math.lerp (min, max) (0.0, float m - 1.0) y |> (round >> int)
+        let quantize y = Math.lerp (min, max) (0.0, float rows - 1.0) y |> (round >> int)
         let buckets = Array.create data.Length -1
-        do data |> Seq.iteri (fun i y ->
+        do data |> Array.iteri (fun i y ->
             if not (Double.IsNaN y) then buckets[i] <- quantize y
-            else buckets[i] <- (if i > 0 then buckets[i - 1] else m / 2))
+            else buckets[i] <- (if i > 0 then buckets[i - 1] else rows / 2))
 
         // rasterize timeseries
-        for rasterHeight = 0 to m - 1 do
+        for rasterHeight = 0 to rows - 1 do
             for col = 0 to data.Length - 1 do
                 // if there's a data point here, the RIGHT segment MUST be drawn
                 let pointHeight = buckets[col]
@@ -308,5 +319,6 @@ module Chart =
 
     /// Paints an individual line across the chart.
     let draw chart (line: ChartLine) =
-        if Seq.length line.Data > 0 then
-            draw' chart line
+        let _, cols = size chart
+        let data = Seq.truncate cols line.Data |> Array.ofSeq
+        if data.Length > 0 then draw' chart line data // skip empty lines
