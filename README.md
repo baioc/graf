@@ -62,9 +62,25 @@ $ while curl -sS -L -w '\n' http://api.coincap.io/v2/rates/bitcoin; do sleep 1; 
 ```
 
 ```sh
-$ python3 -c 'from math import *; [print(sin(4*pi * p/100), cos(4*pi * p/100), sep="\t") for p in range(0, 100)]' > tmp.tsv \
-&& graf -f tmp.tsv --batch; echo \
-&& rm tmp.tsv
+$ python3 -c 'from math import *; [print(sin(4*pi * p/100), cos(4*pi * p/100)) for p in range(0, 100)]' > tmp.tsv
+$ graf -f tmp.tsv --batch
+$ rm tmp.tsv
 ```
 
-![sincos](https://user-images.githubusercontent.com/27034173/200157085-7a2ccf83-5966-4f7d-8b50-3d735dd4e188.png)
+
+## Installation
+
+### Linux
+
+1. Download the [latest release] linux tar.gz
+2. Unpack it: `tar -xzf graf.tar.gz`
+3. Install it by moving the binary into your path: `mv graf /usr/local/bin/`
+
+### Windows
+
+1. Download the [latest release] windows .zip
+2. Unzip it.
+3. Install it by placing the `GRAF.EXE` binary somewhere in your `%PATH%`
+
+
+[latest release]: https://github.com/baioc/graf/releases/latest
