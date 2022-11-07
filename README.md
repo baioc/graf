@@ -28,11 +28,11 @@ Options:
 
 Notes:
     - A single quantization range is used for the entire chart, so make sure
-    timeseries are similarly scaled when there are more than one.
+        timeseries are similarly scaled when there are more than one.
     - When the chart includes multiple lines, a default title is added in order
-    to help disambiguate them; furthermore, each timeseries is colored differently.
+        to help disambiguate them; furthermore, each one is colored differently.
     - Options '--title' and '--color' can be specified multiple times, in which
-    case they will be applied to each timeseries in a corresponding position.
+        case they will be applied to each timeseries in a corresponding position.
 ```
 
 

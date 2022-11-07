@@ -24,7 +24,7 @@ let fatal (msg: string) =
     exit -1
 
 
-let version = "0.3.3"
+let version = "0.4.20"
 
 let usage = $"\
 Usage: graf [OPTION]...
@@ -46,11 +46,11 @@ Options:
 
 Notes:
     - A single quantization range is used for the entire chart, so make sure
-    timeseries are similarly scaled when there are more than one.
+        timeseries are similarly scaled when there are more than one.
     - When the chart includes multiple lines, a default title is added in order
-    to help disambiguate them; furthermore, each timeseries is colored differently.
+        to help disambiguate them; furthermore, each one is colored differently.
     - Options '--title' and '--color' can be specified multiple times, in which
-    case they will be applied to each timeseries in a corresponding position.
+        case they will be applied to each timeseries in a corresponding position.
 
 Colors:
     \x1b[30m k, black \x1b[0m \t \x1b[31m r, red     \x1b[0m \t \x1b[32m g, green \x1b[0m \t \x1b[33m y, yellow \x1b[0m
